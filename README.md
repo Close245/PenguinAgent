@@ -494,6 +494,82 @@ ls build/gather-jar/
 | `common-Bot` | 平台无关核心：QQ 客户端、群消息分发、指令、AI Agent、WebUI |
 | `server-AdapterCommon` | 服务端适配公共层：YAML 配置读写（含保留注释的定点写入） |
 | `server-Nukkit` | Nukkit-MOT 平台适配（本仓库唯一构建目标） |
+| `addon-SexPhoto` | 可选扩展：色图指令（调用外部图库 API）。**不进主插件产物**，需单独构建 |
+
+---
+
+## 扩展（Addon）开发
+
+第三方 Nukkit 插件可以给 HuHoBot 增加 QQ 群指令，不需要改主插件。
+
+### 最小例子
+
+```kotlin
+class MyAddon : PluginBase(), Listener {
+    override fun onEnable() {
+        val hub = server.pluginManager.getPlugin("HuHoBotPenguin-NukkitPlatform") as? HuHoBotNukkit
+            ?: return logger.error("找不到 HuHoBot")
+        server.pluginManager.registerEvents(this, this)
+        hub.registerAddon("MyAddon", "1.0.0", "示例扩展", "你")
+        hub.registerBotCommand("MyAddon", key = "天气", command = "say {params}")
+    }
+
+    @EventHandler
+    fun onCommand(event: OnBotCommand) {
+        if (event.message.commandKey != "天气") return
+        // 取消事件 = 不执行 command 模板里那条服务器命令，改由扩展自己回复
+        event.isCancelled = true
+        event.reply("今天晴")
+    }
+}
+```
+
+`plugin.yml` 里声明 `depend: ["HuHoBotPenguin-NukkitPlatform"]`，构建时
+`compileOnly(project(":server-Nukkit"))` 即可。
+
+### 两个事件
+
+| 事件 | 触发时机 | 取消的含义 |
+|------|----------|------------|
+| `OnBotRecvMsg` | 收到**每条**群消息（内置指令分发之前） | 该消息不再走内置指令与聊天转发 |
+| `OnBotCommand` | 命中**自定义命令**时 | 跳过 `command` 模板里那条服务器命令 |
+
+事件对象携带 `MsgPack`（不可变的群消息快照：`content` / `groupOpenId` /
+`sender` / `commandKey` / `commandArguments` / `attachments` …），并提供
+`reply()` / `replyMarkdown()` / `replyImage()` 三种回复方式。
+
+### ⚠️ 两个必须注意的坑
+
+1. **事件在主线程派发**。QQ 回调本身在 SDK 线程池上，HuHoBot 会切到主线程再触发事件，
+   所以监听器里可以直接碰服务端状态。但**别在主线程里做阻塞 IO**（HTTP 等）——
+   丢到 `server.scheduler.scheduleTask(this, runnable, true)` 里异步做。
+2. **`OnBotRecvMsg` / `OnBotCommand` / `MsgPack` 三个类由 HuHoBot 在 `onEnable` 里主动预热**。
+   Nukkit 每个插件一个 `PluginClassLoader`，它的查找顺序是「自己的 jar → 全局**已加载**类注册表」；
+   这几个类是懒加载的，不预热的话 addon 注册监听器时会 `ClassNotFoundException`。
+   写主插件时如果新增了要暴露给 addon 的类，记得一并加进 `preloadAddonApiClasses()`。
+
+### 随仓库提供的示例扩展：`addon-SexPhoto`
+
+一个完整可用的例子，实现 `/色图` 指令：调用 [SexPhoto API](https://sex.nyan.run/api.html)
+（Pixiv 图库检索）取图并发到 QQ 群。
+
+```bash
+./gradlew :addon-SexPhoto:build
+# 产物：addon/SexPhoto/build/libs/HuHoBot-Addon-SexPhoto-<版本>.jar
+```
+
+丢进服务端 `plugins/` 即可，配置在 `plugins/HuHoBot-Addon-SexPhoto/config.yml`。
+
+群里的用法：`/色图` 或 `/色图 白洲梓`（也支持 `/执行 色图 ...`）。
+
+**关于分级**：`r18: false` 是默认值。但**这个 API 的 `r18=false` 过滤是漏的** ——
+实测仍有 10%~30% 的结果带 `R-18` 标签。所以扩展在客户端又兜了一层：`r18: false` 时
+丢弃带 `R-18`/`R-18G` 标签的作品，并补一次请求凑数。实测 30 张 0 漏网。
+
+> 打开 `r18: true` 前请自行确认群成员年龄构成与当地法律。扩展不做任何年龄校验。
+
+**关于限流**：对方按 IP 限流，且**非常严**（实测间隔 2.5 秒的两次请求就会 429）。
+默认冷却 30 秒，不建议调小。
 
 ---
 

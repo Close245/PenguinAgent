@@ -35,4 +35,9 @@ project(":server-AdapterCommon").projectDir = file("server/AdapterCommon")
 include(":server-Nukkit")
 project(":server-Nukkit").projectDir = file("server/Nukkit")
 
+// 可选扩展（addon）：各自是独立的 Nukkit 插件，运行时通过 HuHoBot 的扩展 API 挂接。
+// 不进主插件产物，需要单独构建：./gradlew :addon-SexPhoto:build
+include(":addon-SexPhoto")
+project(":addon-SexPhoto").projectDir = file("addon/SexPhoto")
+
 rootProject.name = "HuHoBotPenguin-NukkitPlatform"

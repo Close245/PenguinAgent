@@ -1,0 +1,12 @@
+name: HuHoBot-Addon-SexPhoto
+main: cn.huohuas001.addon.sexphoto.SexPhotoAddon
+version: '@version@'
+api: ["1.0.0"]
+load: POSTWORLD
+
+# 硬依赖：本扩展通过 HuHoBot 的扩展 API 挂接，没有它跑不起来。
+depend: ["HuHoBotPenguin-NukkitPlatform"]
+
+author: Close245
+description: 为 HuHoBot 提供色图指令：调用 SexPhoto API（Pixiv 图库）取图并发到 QQ 群
+website: https://github.com/HuHoBot/PenguinAgent-NukkitPlatform
