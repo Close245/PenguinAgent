@@ -22,9 +22,10 @@ project(":common-Bot").projectDir = file("common/Bot")
 include(":server-AdapterCommon")
 project(":server-AdapterCommon").projectDir = file("server/AdapterCommon")
 
-// 本仓库只构建 Nukkit-MOT 平台。Spigot / Allay / Proxy 源码仍保留在仓库中，但不参与构建。
-// include(":server-Spigot")
-// project(":server-Spigot").projectDir = file("server/Spigot")
+include(":server-Spigot")
+project(":server-Spigot").projectDir = file("server/Spigot")
+
+// Allay / Proxy 源码仍保留在仓库中，但不参与构建。
 //
 // include(":server-Allay")
 // project(":server-Allay").projectDir = file("server/Allay")
@@ -39,5 +40,10 @@ project(":server-Nukkit").projectDir = file("server/Nukkit")
 // 不进主插件产物，需要单独构建：./gradlew :addon-SexPhoto:build
 include(":addon-SexPhoto")
 project(":addon-SexPhoto").projectDir = file("addon/SexPhoto")
+
+// Spigot 的 GraalPy 引擎。不进主插件产物，放到 plugins/HuHoBotPenguin/engines/。
+// ./gradlew :addon-GraalPy:shadowJar
+include(":addon-GraalPy")
+project(":addon-GraalPy").projectDir = file("addon/GraalPy")
 
 rootProject.name = "HuHoBotPenguin-NukkitPlatform"

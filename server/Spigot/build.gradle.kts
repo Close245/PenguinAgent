@@ -20,15 +20,30 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.google.zxing:javase:3.5.3")
     implementation("org.bstats:bstats-bukkit:3.2.1")
-    compileOnly("org.spigotmc:spigot-api:1.16.5-R0.1-SNAPSHOT")
+    compileOnly("org.spigotmc:spigot-api:1.20.4-R0.1-SNAPSHOT")
     compileOnly("org.apache.logging.log4j:log4j-api:2.17.1")
     compileOnly("org.apache.logging.log4j:log4j-core:2.17.1")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
     implementation("org.bstats:bstats-bukkit:3.2.1")
+
+    // Script addon engines that ship inside the main jar: GraalJS and LuaJ.
+    // GraalPy does NOT ship here. It is ~180 MB unpacked, so it lives in the
+    // separate :addon-GraalPy jar and is loaded at runtime from
+    // plugins/HuHoBotPenguin/engines/. Compiling the loader only needs the
+    // polyglot API, which js-language already brings in.
+    //
+    // 不要用 org.graalvm.polyglot:js-community 那个 POM：它的真正引擎是 runtime scope，
+    // Gradle 不传递，shadowJar 里会是空壳。
+    val graal = "24.1.2"
+    implementation("org.graalvm.js:js-scriptengine:$graal")
+    implementation("org.graalvm.polyglot:polyglot:$graal")
+    implementation("org.graalvm.js:js-language:$graal")
+    implementation("org.graalvm.truffle:truffle-runtime:$graal")
+    implementation("org.luaj:luaj-jse:3.0.1")
 }
 
 kotlin {
-    jvmToolchain(8)
+    jvmToolchain(17)
 }
 
 tasks {
@@ -79,6 +94,11 @@ tasks {
         archiveFileName.set("HuHoBot-Penguin_Spigot-${project.version}.jar")
         finalizedBy(gatherJar)
         relocate("org.bstats", "${project.group}.bstats")
+        mergeServiceFiles()
+        exclude(
+            "META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA",
+            "module-info.class", "**/module-info.class", "META-INF/versions/**"
+        )
     }
 
     processResources {
