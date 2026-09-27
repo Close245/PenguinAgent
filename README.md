@@ -29,7 +29,7 @@
 | **QQ 群管理** | AI Agent 集成禁言、入群审批、自动审批策略等群管理工具 |
 | **指令面板自动同步** | 启动时自动同步命令面板到 QQ 群（上限 20 条） |
 | **背包与末影箱查看** | `/我的背包`、`/我的末影箱` 查询唯一绑定账户；管理员可用 `/背包查看 <在线玩家名>`、`/末影箱查看 <在线玩家名>` |
-| **脚本扩展** | `addons/` 下的 `.js` / `.lua` / `.py` 脚本，用 `Bird` 桥注册事件、命令和 QQ 群指令 |
+| **脚本扩展** | `addons/<名字>/` 目录插件，入口 `main.js` / `main.lua` / `main.py`，用 `Bird` 桥 |
 
 ---
 
@@ -468,69 +468,36 @@ ls build/gather-jar/
 
 ## Spigot 脚本扩展（JS / Python / Lua）
 
-Spigot 适配器支持三种脚本，把脚本丢进插件数据目录即可，不必再单独装一个插件。
-Lua 打在主 jar 里；GraalJS（约 37 MB）与 GraalPy（约 180 MB）拆成独立引擎包，不放也能启动：
+一个插件是 `addons/` 下的一个目录，不是单个文件。根上直接放的 `.js` / `.lua` / `.py` 不加载。
+Lua 打在主 jar 里；GraalJS（约 37 MB）与 GraalPy（约 180 MB）拆成两个引擎包，不放也能启动：
 
-| 语言 | 引擎 | 放在哪 |
+| 入口 | 引擎 | 放在哪 |
 |------|------|--------|
-| `.lua` | LuaJ | 主 jar 内，与 [BirdLibraryApi](https://github.com/prach1121/birdlibraryapi)（Apache-2.0）相同 |
-| `.js` | GraalJS | **独立 jar**，不进主包。接线方式与 BirdLibraryApi 相同 |
-| `.py` | GraalPy（Python 3） | **独立 jar**，不进主包 |
-
-JS 与 Python 引擎要单独构建，放进插件数据目录，不放也能启动，只是对应脚本加载失败：
+| `main.lua` | LuaJ | 主 jar 内 |
+| `main.js` | GraalJS | `engines/HuHoBot-Engine-GraalJs-<版本>.jar` |
+| `main.py` | GraalPy（Python 3） | `engines/HuHoBot-Engine-GraalPy-<版本>.jar` |
 
 ```bash
 ./gradlew :addon-GraalJs:shadowJar :addon-GraalPy:shadowJar
-# 产物：addon/GraalJs/build/libs/HuHoBot-Engine-GraalJs-<版本>.jar
-#       addon/GraalPy/build/libs/HuHoBot-Engine-GraalPy-<版本>.jar
-# 放到：plugins/HuHoBotPenguin/engines/
+# 放到 plugins/HuHoBotPenguin/engines/
 ```
 
 ```
-plugins/HuHoBotPenguin/addons/hello.js
-plugins/HuHoBotPenguin/addons/hello.py
-plugins/HuHoBotPenguin/addons/hello.lua
+plugins/HuHoBotPenguin/addons/hello/
+├── metadata.yaml          name / version / author / description / entry
+├── _conf_schema.json      配置声明，实际值写到 addons/config/hello.json
+└── main.js                或 main.lua / main.py
 ```
 
-启动时自动加载。重载：
-
 ```
-/huhobot scripts reload            # 全部重载
-/huhobot scripts reload hello.py   # 只重载一个（省略扩展名时按 lua → py → js 探测）
+/huhobot scripts reload
+/huhobot scripts reload hello
 ```
 
-每个脚本都会被登记为一个 HuHoBot addon（名字取文件名、去掉扩展名），并注入全局对象 `Bird`、`Bukkit`、`server`、`plugin`。
-脚本里可以继续调用 HuHoBot 的扩展 API：
+三种语言都注入 `Bird`、`Bukkit`、`server`、`plugin`、`config`、`kv`、`DATA_DIR`。
+加载失败会撤掉已经登记的 addon。两个目录写成同一个 `name` 会被拒绝。
+`"_enabled": false` 跳过该插件。详细说明见 `docs/spigot-script-addons.md`。
 
-```javascript
-// hello.js — 需要先把 GraalJS 引擎 jar 放到 plugins/HuHoBotPenguin/engines/
-Bird.registerBotCommand(Bird.addonName(), "问好", "say {params}");
-Bird.onEvent("org.bukkit.event.player.PlayerJoinEvent", function (event) {
-    Bird.tell(event.getPlayer(), "&a欢迎");
-});
-```
-
-```python
-# hello.py — Python 3（GraalPy）。需要先把引擎 jar 放到 plugins/HuHoBotPenguin/engines/
-def on_join(event):
-    Bird.tell(event.getPlayer(), "&a欢迎")
-
-Bird.registerBotCommand(Bird.addonName(), "问好", "say {params}")
-Bird.onEvent("org.bukkit.event.player.PlayerJoinEvent", on_join)
-```
-
-```lua
--- hello.lua
-Bird:registerBotCommand(Bird:addonName(), "问好", "say {params}")
-```
-
-`Bird.registerBotCommand(addonName, key, command)` 注册的是 QQ 群自定义命令，`command` 是服务器命令模板，占位符与配置里的自定义命令相同。
-脚本重载时，它自己注册的 QQ 命令、Bukkit 事件和动态命令会一起卸掉。
-
-脚本数据写在 `addons/data/<脚本名>.properties`，`Bird.saveFile` / `readFile` 限制在 `addons/files/<脚本名>/` 内。
-完整说明见 `docs/spigot-script-addons.md`。
-
----
 
 ## 版本历史
 

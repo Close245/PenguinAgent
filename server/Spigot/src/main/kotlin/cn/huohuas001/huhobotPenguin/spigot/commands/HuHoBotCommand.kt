@@ -55,14 +55,14 @@ class HuHoBotCommand(private val plugin: HuHoBotSpigot) : TabExecutor {
     }
 
     /**
-     * `/huhobot scripts reload [文件]`
-     * 重载 `plugins/HuHoBotPenguin/addons` 下的 .js / .py / .lua。
-     * 不带文件名时全部重载；带文件名时只重载那一个（省略扩展名时按 lua → py → js 探测）。
+     * `/huhobot scripts reload [插件名]`
+     * 重载 `plugins/HuHoBotPenguin/addons` 下的目录插件。
+     * 不带名字时全部重载；带名字时只重载那个目录（大小写不敏感）。
      */
     private fun handleScripts(sender: CommandSender, args: Array<out String>) {
         val action = args.getOrNull(1)?.lowercase()
         if (action != "reload") {
-            sender.sendMessage("用法: /huhobot scripts reload [文件名]")
+            sender.sendMessage("用法: /huhobot scripts reload [插件名]")
             return
         }
         val loader = plugin.getScriptAddonLoader()
@@ -122,7 +122,7 @@ class HuHoBotCommand(private val plugin: HuHoBotSpigot) : TabExecutor {
         sender.sendMessage("/$label info - 查看适配器信息")
         sender.sendMessage("/$label password <新密码> - 修改 WebUI 登录密码")
         sender.sendMessage("/$label webui - 查看 WebUI 地址")
-        sender.sendMessage("/$label scripts reload [文件] - 重载 JS/Python/Lua 脚本扩展")
+        sender.sendMessage("/$label scripts reload [插件名] - 重载 addons/ 下的目录插件")
         sender.sendMessage("/send <消息> - 向 QQ 群发送消息")
     }
 

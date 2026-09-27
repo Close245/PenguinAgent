@@ -441,6 +441,12 @@ class HuHoBotSpigot : JavaPlugin(), HuHoBot {
         return true
     }
 
+    /** 卸载扩展登记。QQ 命令要另外调用 [unregisterBotCommand]。 */
+    fun unregisterAddon(name: String) {
+        if (name.isBlank() || name !in AddonManager) return
+        AddonManager.unregister(name)
+    }
+
     /** 注销运行时自定义命令，并按需刷新 QQ 命令面板。 */
     fun unregisterBotCommand(key: String): Boolean {
         val removed = CustomCommandRegistry.unregister(key)

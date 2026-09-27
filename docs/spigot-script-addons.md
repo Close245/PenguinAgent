@@ -1,6 +1,6 @@
 # Spigot 脚本扩展：JavaScript、Lua 与 Python
 
-本文说明 HuHoBotPenguin 的 Spigot / Paper 适配器如何加载 `.js`、`.lua` 与 `.py` 脚本扩展：概念、加载流程、暴露给脚本的桥，以及可直接运行的例子。
+本文说明 HuHoBotPenguin 的 Spigot / Paper 适配器如何加载脚本插件。一个插件是 `addons/` 下的一个目录，里面放 `main.js`、`main.lua` 或 `main.py`，不是单个文件。
 
 - 适用版本：`1.14.0`
 - 插件名：`HuHoBotPenguin`
@@ -14,7 +14,7 @@
 
 ## 1. addon 模块
 
-`settings.gradle.kts` 里和 Spigot 脚本有关的是下面两个引擎包。它们不是 Bukkit 插件：没有 `plugin.yml`，也不注册命令。`:addon-NukkitJs` 与 `:addon-NukkitPy` 是 Nukkit 侧的，不要放进 Spigot 的 `engines/`。
+`settings.gradle.kts` 里的脚本引擎是下面两个。它们不是 Bukkit 插件：没有 `plugin.yml`，也不注册命令。两个 jar 只含 Graal 运行时和桥，不含 Nukkit 代码，所以另一边的服务端也能把同一对 jar 放进自己的 `engines/`。
 
 | 模块 | 是什么 | 产物与位置 |
 |------|--------|------------|
@@ -34,11 +34,11 @@ GraalJS 解压后约 37 MB，GraalPy 约 180 MB。两个 jar 各带一份 polygl
 
 不放对应的 jar，插件正常启动，该语言的脚本加载时报「未安装脚本引擎」，其它语言不受影响。
 
-| 扩展名 | 引擎与位置 | 全局对象 |
-|--------|------------|----------|
-| `.lua` | LuaJ 3.0.1，在主 jar | `Bird`、`Bukkit`、`server`、`plugin` |
-| `.js` | GraalJS 24.1.2，`engines/HuHoBot-Engine-GraalJs-*.jar` | 同上 |
-| `.py` | GraalPy 24.1.2（Python 3），`engines/HuHoBot-Engine-GraalPy-*.jar` | 同上 |
+| 入口 | 引擎与位置 | 全局对象 |
+|------|------------|----------|
+| `main.lua` | LuaJ 3.0.1，在主 jar | `Bird`、`Bukkit`、`server`、`plugin`、`config`、`kv`、`DATA_DIR` |
+| `main.js` | GraalJS 24.1.2，`engines/HuHoBot-Engine-GraalJs-*.jar` | 同上 |
+| `main.py` | GraalPy 24.1.2（Python 3），`engines/HuHoBot-Engine-GraalPy-*.jar` | 同上 |
 
 | 名字 | 是什么 | 用来做什么 |
 |------|--------|------------|
@@ -56,44 +56,35 @@ GraalJS 解压后约 37 MB，GraalPy 约 180 MB。两个 jar 各带一份 polygl
 ## 2. 框架
 
 ```
-plugins/HuHoBotPenguin/addons/
-        hello.js    hello.lua    hello.py
-            |           |           |
-            +-----------+-----------+
+plugins/HuHoBotPenguin/addons/welcome/
+        metadata.yaml    _conf_schema.json    main.lua | main.py | main.js
+                        |
                         v
         HuHoBotSpigot.onEnable() → loadScriptAddons()
                         |
                         v
         ScriptAddonLoader.loadAll()
-        按文件名排序，先按文件名登记一份 addon，再 loadScript()
-                |              |              |
-          endsWith .lua   endsWith .js   endsWith .py
-                |              |              |
-        LuaJ JsePlatform   GraalJsBridge   GraalPyBridge
-        globals.load()     .open()         createEngine() 缓存
-                           反射 bind/eval   每个脚本一个 Context
-                |              |              |
-                +--------------+--------------+
+        只看 addons/ 下的目录，跳过 config/、data/、files/
+        读 metadata.yaml，按 schema 打开 addons/config/<名字>.json
+                        |
+            main.lua         main.js          main.py
+                |              |                |
+        LuaJ JsePlatform   GraalJsBridge    GraalPyBridge
+                |              |                |
+                +--------------+----------------+
                                v
-                注入 Bird / Bukkit / server / plugin
+        注入 Bird / Bukkit / server / plugin / config / kv / DATA_DIR
                                |
                                v
-                BirdScriptApi
-                  onEvent  → PluginManager.registerEvent
-                  onCommand → CommandMap.register
-                  runTask* → BukkitScheduler
-                  registerBotCommand → 自定义命令 + AddonManager
-                               |
-                               v
-                成功后再按语言描述覆盖 addon 元数据
-                /huhobot scripts reload 走卸载再加载
+        先按 metadata 登记 addon，成功后再用语言描述覆盖
+        /huhobot scripts reload welcome 走卸载再加载
 ```
 
 卸载（`/huhobot scripts reload`，或插件 `onDisable`）的顺序是：
 
 1. `Bird.unregisterAll()`：取消该脚本的 Bukkit 事件、动态命令、定时任务、QQ 自定义命令。
 2. 调用引擎对象的 `close()`。Lua 的 `Globals` 没有需要关闭的资源；JS 与 Python 会关掉各自的 polyglot `Context`。
-3. 从已加载表里移除。只重载一个文件时，其它脚本不受影响。
+3. 从已加载表里移除。只重载一个目录时，其它插件不受影响。
 
 ---
 
@@ -104,12 +95,26 @@ plugins/HuHoBotPenguin/addons/
 `HuHoBotSpigot.onEnable()` 末尾调用 `loadScriptAddons()`：
 
 1. `new ScriptAddonLoader(this)`。`plugins/HuHoBotPenguin/addons/` 不存在就创建它，`engines/` 同样。
-2. `loadAll()`。列出目录里所有 `.js` / `.lua` / `.py`，按文件名排序后逐个加载。
-3. 失败的脚本被跳过，插件继续运行。
+2. `loadAll()`。列出 `addons/` 下的目录（跳过 `config/`、`data/`、`files/`），按目录名排序后逐个加载。根上直接放的 `.js` / `.lua` / `.py` 不加载，控制台提示挪进目录。
+3. 失败的插件被跳过，插件继续运行。
+
+一个目录里放：
+
+```
+addons/welcome/
+├── metadata.yaml        name / version / author / description / entry
+├── _conf_schema.json    配置声明，可省略
+├── requirements.txt     依赖声明，只预检不安装，可省略
+└── main.lua             入口。entry 没写时按 main.lua、main.py、main.js 找
+```
+
+`metadata.yaml` 只认顶层 `key: value`。缺省时名字和作者用目录名，版本 `1.0.0`。配置实际写在 `addons/config/<名字>.json`，和代码分开；`"_enabled": false` 就跳过这个插件。大文件放 `addons/data/<名字>/`（脚本里的 `DATA_DIR`），键值放同目录的 `kv.properties`。
+
+三种语言都多注入三个全局：`config`、`kv`、`DATA_DIR`。Lua 用冒号（`config:getString("token")`、`kv:put("k", "v")`），JS 和 Python 用点。`config` 有 `get`、`getString`、`getList`、`set`、`remove`、`all`；`kv` 有 `get`、`put`、`delete`、`all`。
 
 ### 3.2 登记时机
 
-脚本在执行期间就会调用 `registerBotCommand`，而它要求 addon 已经登记。所以 `loadScript` **先**按文件名登记一份（版本 `1.0.0`，描述 `script addon`，作者是文件名），文件跑成功后再用语言描述覆盖：`JavaScript script addon` / `Lua script addon` / `Python script addon`。脚本自己再调 `Bird.registerAddon(...)` 可以改掉元数据。
+脚本在执行期间就会调用 `registerBotCommand`，而它要求 addon 已经登记。所以加载器**先**按 metadata 登记一份，文件跑成功后再用语言描述覆盖：`JavaScript script addon` / `Lua script addon` / `Python script addon`。metadata 里写了描述就用描述。脚本自己再调 `Bird.registerAddon(...)` 可以改掉元数据。
 
 ### 3.3 `.lua`
 
@@ -134,7 +139,7 @@ plugins/HuHoBotPenguin/addons/
    | `allowHostClassLookup(s -> true)` | `Java.type("任意类")` 都放行 |
    | `js.nashorn-compat = true` | 兼容 Nashorn 写法（`Java.type`） |
 
-3. `bind` 注入 `Bird`、`Bukkit`、`server`、`plugin`，再 `eval(文件)`。执行的是**文件顶层**，没有 `onEnable`。
+3. `bind` 注入 `Bird`、`Bukkit`、`server`、`plugin`、`config`、`kv`、`DATA_DIR`，再 `eval(文件)`。执行的是**文件顶层**，没有 `onEnable`。
 4. 语法或运行错误取第一行记一条日志，并关掉已经打开的上下文。
 
 `GraalJsBridge.adapt` 把脚本函数适配成宿主声明的接口（`EventCallback`、`CommandCallback`、`TabCompleteCallback`、`Runnable`、`Consumer`）。返回 `List` 的回调（Tab 补全）会转成 Java `List`。
@@ -145,26 +150,41 @@ plugins/HuHoBotPenguin/addons/
 
 1. 第一次遇到 `.py` 时反射调用 `GraalPyBridge.createEngine()`，得到一个共享的 `org.graalvm.polyglot.Engine`，并确认它真的提供 `python` 语言。这个 Engine 被缓存。
 2. 每个脚本调用 `GraalPyBridge.open(engine)` 建自己的 `Context`（`allowAllAccess(true)`）。脚本之间不共享全局变量，但共用同一个 Engine。
-3. 同样注入 `Bird`、`Bukkit`、`server`、`plugin`，然后 `eval(文件)`。顶层即执行。
+3. 同样注入 `Bird`、`Bukkit`、`server`、`plugin`、`config`、`kv`、`DATA_DIR`。`requirements.txt` 里的模块会先 `import` 一次，缺了只记警告，然后 `eval(文件)`。顶层即执行。
 4. 脚本错误被包成引擎 jar 里的 `GraalPyBridge.Failure`（主插件 classpath 上没有 `PolyglotException`）。`line()` 有源码行号时，日志会带 `(line N)`。
 
-GraalPy 是 Python 3，不是 Jython。Nukkit 那份 `.py`（Python 2.7、`api.register_event`）不能直接拿到这里跑。
+GraalPy 是 Python 3。Nukkit 侧的 `.py` 也是 GraalPy，但桥和全局对象不同（那边是 `api`，这边是 `Bird`），两边的脚本不能互相拷。
 
 ### 3.6 重载
 
 | 命令 | 行为 |
 |------|------|
 | `/huhobot scripts reload` | 卸载全部再加载全部 |
-| `/huhobot scripts reload hello` | 不带扩展名时按 `hello.lua`、`hello.py`、`hello.js` 的顺序找第一个存在的 |
-| `/huhobot scripts reload hello.js` | 只重载这一个文件 |
+| `/huhobot scripts reload welcome` | 只重载 `addons/welcome/`，目录名大小写不敏感 |
 
-命令挂在已有的 `/huhobot` 下，权限是 `huhobot.command`（默认 OP）。补全会列出 `addons/` 里的文件名。
+命令挂在已有的 `/huhobot` 下，权限是 `huhobot.command`（默认 OP）。补全会列出 `addons/` 下的目录名。
 
-### 3.7 失败时
+### 3.7 失败、重名和禁用
 
-- 文件编译失败：控制台一条 `[文件名] ... error`，这条脚本不登记为可用 addon，其它脚本继续。
-- 脚本运行中抛错（事件处理、定时任务、命令回调）：`Bird` 捕获后写警告和堆栈，不会把服务器打崩。
-- 插件 `onDisable`：`unloadAll()`，把每个脚本的 `Bird.unregisterAll()` 调一遍。
+- 入口编译或执行失败：控制台一条 `[名字] ... error`。加载前已经 `registerAddon` 的那份会被 `unregisterAddon` 撤掉，不会在 QQ 菜单里留下一个空插件。其它目录继续加载。
+- 两个目录的 `metadata.yaml` 写成同一个 `name`：后一个被跳过，日志写「插件名已被另一个目录使用」。重载键是目录名，登记名是 metadata 的 `name`，两者必须一一对应。
+- 脚本跑起来之后抛错（事件、定时任务、命令回调）：`Bird` 捕获后写警告，不会把服务器打崩。
+- `addons/config/<名字>.json` 里 `"_enabled": false`：这个目录不加载，日志记「已禁用」。
+- schema 里某个键的 `default` 是 `null` 或没写：这个键不进配置表，`config.get` 返回 `null`，不会让插件加载失败。
+- 配置或 kv 写盘失败：stderr 打 `[script-config]` 或 `[script-kv]`，不再静默丢掉。
+- 插件 `onDisable`：`unloadAll()`，每个脚本走 `Bird.unregisterAll()`，再关掉对应的引擎上下文。
+
+### 3.8 重载时卸掉什么
+
+`/huhobot scripts reload welcome` 对这一份 `Bird` 做：
+
+1. 反注册它登记过的 Bukkit 事件。
+2. 从命令表摘掉 `onCommand` 注册的动态命令。
+3. 取消它创建的全部定时任务。
+4. 删掉它登记的 QQ 群命令。
+5. `unregisterAddon`，再按同样的流程重新加载这个目录。
+
+其它目录不受影响。Lua 的 `Globals` 没有要关的资源；JS 和 Python 会关掉自己的 polyglot `Context`。Spigot 的 GraalPy `Engine` 是所有 `.py` 共享的一个，重载单个插件不会把它关掉。
 
 ---
 
@@ -338,7 +358,7 @@ Bird.runCommandAs(玩家, "spawn")     以该玩家身份
 
 ## 5. JavaScript 示例
 
-文件：`plugins/HuHoBotPenguin/addons/welcome.js`
+入口：`plugins/HuHoBotPenguin/addons/welcome/main.js`
 
 需要先把 `HuHoBot-Engine-GraalJs-<版本>.jar` 放到 `engines/`。
 
@@ -378,7 +398,7 @@ if (player !== null) player.setGameMode(GameMode.CREATIVE);
 
 ## 6. Lua 示例
 
-文件：`plugins/HuHoBotPenguin/addons/welcome.lua`
+入口：`plugins/HuHoBotPenguin/addons/welcome/main.lua`
 
 Lua 不需要引擎 jar。Java 方法都用**冒号**调用。
 
@@ -419,7 +439,7 @@ Bird:log("Bukkit 报告在线 " .. players:size())
 
 ## 7. Python 示例
 
-文件：`plugins/HuHoBotPenguin/addons/welcome.py`
+入口：`plugins/HuHoBotPenguin/addons/welcome/main.py`
 
 需要 `HuHoBot-Engine-GraalPy-<版本>.jar`。这是 Python 3（GraalPy），用点和普通函数，没有 Nukkit 那套 `api.register_event`。
 
@@ -467,8 +487,8 @@ Bird.fetch("https://example.com/motd.txt", on_motd)
   └─ Bukkit 回调进 BirdScriptApi
        └─ 转进脚本函数；异常被吃掉并写日志
 
-/huhobot scripts reload hello.js
-  └─ 找到已加载的 hello.js
+/huhobot scripts reload hello
+  └─ 找到已加载的 addons/hello/
        ├─ Bird.unregisterAll()        事件、命令、任务、QQ 命令
        ├─ close()
        └─ 重新 loadScript
@@ -499,12 +519,15 @@ Bird.fetch("https://example.com/motd.txt", on_motd)
 
 ```
 plugins/HuHoBotPenguin/
-├── addons/                  脚本放这里
-│   ├── welcome.js           需要 GraalJS 引擎 jar
-│   ├── welcome.lua          主 jar 就能跑
-│   ├── welcome.py           需要 GraalPy 引擎 jar
-│   ├── data/                Bird.setData 的 properties
-│   │   └── welcome.properties
+├── addons/
+│   ├── welcome/             一个目录一个插件
+│   │   ├── metadata.yaml
+│   │   ├── _conf_schema.json
+│   │   └── main.js          或 main.lua / main.py
+│   ├── config/              schema 生成的实际配置
+│   │   └── welcome.json
+│   ├── data/                DATA_DIR 与 kv.properties；Bird.setData 也在这
+│   │   └── welcome/
 │   └── files/               Bird.saveFile 的根
 │       └── welcome/
 └── engines/                 JS 与 Python 需要，Lua 不需要
@@ -514,6 +537,5 @@ plugins/HuHoBotPenguin/
 
 ```
 /huhobot scripts reload
-/huhobot scripts reload welcome.js
 /huhobot scripts reload welcome
 ```

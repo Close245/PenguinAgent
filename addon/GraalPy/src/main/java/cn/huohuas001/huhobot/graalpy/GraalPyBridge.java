@@ -2,6 +2,7 @@ package cn.huohuas001.huhobot.graalpy;
 
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
+import org.graalvm.polyglot.HostAccess;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.SourceSection;
@@ -34,7 +35,16 @@ public final class GraalPyBridge {
 
         void eval(File file) throws Failure;
 
+        /** 在当前上下文里求一段 Python 源码，依赖预检用。失败时抛 {@link Failure}。 */
+        void evalSource(String source) throws Failure;
+
+        /** 顶层变量的值；不存在返回 null。 */
+        Object get(String name);
+
         void close();
+
+        /** 关掉这个 Session 自己建的 Engine。共享 Engine 的调用方不要用。 */
+        void closeEngine();
     }
 
     /** A script failure, with the source line when GraalPy reported one. */
@@ -64,26 +74,67 @@ public final class GraalPyBridge {
         return engine instanceof Engine && ((Engine) engine).getLanguages().containsKey("python");
     }
 
+    /** 自建 Engine 再开一个上下文。Nukkit 走这条；Spigot 用 {@link #open(Object)} 共享 Engine。 */
+    public static Session open() {
+        Engine engine = createEngine();
+        return new PySession(context(engine), engine);
+    }
+
+    public static boolean canExecute(Object value) {
+        return value instanceof Value && ((Value) value).canExecute();
+    }
+
+    public static Object execute(Object function, Object... args) {
+        return ((Value) function).execute(args);
+    }
+
+    public static String asString(Object value) {
+        if (!(value instanceof Value)) return value == null ? null : String.valueOf(value);
+        Value v = (Value) value;
+        try {
+            if (v.isNull()) return null;
+            return v.isString() ? v.asString() : v.toString();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * 函数保留为原始 {@link Value}，避免被映射成 {@code java.util.function.Function}。
+     * 目标类型是具体函数式接口时不受影响，宿主仍能直接收到适配后的回调。
+     */
+    private static HostAccess hostAccess() {
+        return HostAccess.newBuilder(HostAccess.ALL)
+                .targetTypeMapping(Value.class, Object.class, Value::canExecute, value -> value, HostAccess.TargetMappingPrecedence.HIGHEST)
+                .build();
+    }
+
     public static Session open(Object engine) {
         if (!(engine instanceof Engine)) {
             throw new IllegalArgumentException("不是 GraalPy 引擎: " + engine);
         }
-        Engine graal = (Engine) engine;
         // engine.WarnInterpreterOnly 是引擎级选项，共享 Engine 的 Context 上再设会被拒绝。
-        Context context = Context.newBuilder("python")
-                .engine(graal)
+        // ownedEngine 传 null：这个 Engine 是调用方的，Session 关掉时不能连带关掉。
+        return new PySession(context((Engine) engine), null);
+    }
+
+    private static Context context(Engine engine) {
+        return Context.newBuilder("python")
+                .engine(engine)
                 .allowAllAccess(true)
+                .allowHostAccess(hostAccess())
+                .allowHostClassLookup(className -> true)
                 .build();
-        // 具名的 public 静态类：主插件在另一个 classloader 里反射调用，
-        // 匿名内部类会被 JDK 拒绝访问。
-        return new PySession(context);
     }
 
     public static final class PySession implements Session {
         private final Context context;
+        private final Engine ownedEngine;
 
-        PySession(Context context) {
+        /** {@code ownedEngine} 非空时，{@link #closeEngine()} 会把它关掉。 */
+        PySession(Context context, Engine ownedEngine) {
             this.context = context;
+            this.ownedEngine = ownedEngine;
         }
 
         @Override
@@ -106,8 +157,27 @@ public final class GraalPyBridge {
         }
 
         @Override
+        public Object get(String name) {
+            Value value = context.getBindings("python").getMember(name);
+            return value == null || value.isNull() ? null : value;
+        }
+
+        public void evalSource(String source) throws Failure {
+            try {
+                context.eval("python", source);
+            } catch (PolyglotException error) {
+                throw new Failure(error.getMessage(), -1, error);
+            }
+        }
+
+        @Override
         public void close() {
             context.close(true);
+        }
+
+        @Override
+        public void closeEngine() {
+            if (ownedEngine != null) ownedEngine.close();
         }
     }
 }

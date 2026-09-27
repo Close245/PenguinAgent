@@ -134,22 +134,21 @@ public class ScriptAddonLoader {
         }
     }
 
-    private static boolean isScriptFile(String name) {
-        String lower = name.toLowerCase();
-        return lower.endsWith(".js") || lower.endsWith(".lua") || lower.endsWith(".py");
-    }
-
     public List<ScriptLoadResult> loadAll() {
         List<ScriptLoadResult> results = new ArrayList<>();
         try {
-            File[] files = scriptsFolder.listFiles((dir, name) -> isScriptFile(name));
-            if (files == null || files.length == 0) {
-                plugin.getLogger().info("No .js, .lua or .py addons found in " + scriptsFolder.getPath());
+            warnStrayScripts();
+            File[] dirs = scriptsFolder.listFiles(File::isDirectory);
+            if (dirs == null || dirs.length == 0) {
+                plugin.getLogger().info("addons 目录没有脚本插件（建一个目录，放 main.lua / main.py / main.js）: "
+                        + scriptsFolder.getPath());
                 return results;
             }
-            Arrays.sort(files, Comparator.comparing(File::getName));
-            for (File f : files) {
-                results.add(loadScript(f));
+            Arrays.sort(dirs, Comparator.comparing(File::getName));
+            for (File dir : dirs) {
+                if ("config".equalsIgnoreCase(dir.getName()) || "data".equalsIgnoreCase(dir.getName())
+                        || "files".equalsIgnoreCase(dir.getName())) continue;
+                results.add(loadDirectory(dir));
             }
         } catch (Throwable t) {
             plugin.getLogger().severe("Fatal error while scanning the addon scripts folder: " + t);
@@ -158,25 +157,74 @@ public class ScriptAddonLoader {
         return results;
     }
 
-    public ScriptLoadResult loadScript(File file) {
-        String name = file.getName();
-        String lower = name.toLowerCase();
+    /** 旧结构提示：addons/ 根上直接放 .lua/.py/.js 已不再加载。 */
+    private void warnStrayScripts() {
+        File[] stray = scriptsFolder.listFiles((dir, name) -> {
+            String lower = name.toLowerCase();
+            return lower.endsWith(".js") || lower.endsWith(".lua") || lower.endsWith(".py");
+        });
+        if (stray == null) return;
+        for (File file : stray) {
+            String base = baseName(file.getName());
+            String ext = file.getName().substring(file.getName().lastIndexOf('.'));
+            plugin.getLogger().warning("[" + file.getName() + "] 脚本扩展已改为目录插件：请挪到 addons/"
+                    + base + "/main" + ext + " 后重载");
+        }
+    }
+
+    /**
+     * 一个目录就是一个插件。入口优先用 metadata.yaml 的 entry，否则按
+     * main.lua、main.py、main.js 找第一个存在的。
+     */
+    public ScriptLoadResult loadDirectory(File dir) {
+        ScriptPackage pkg = ScriptPackage.open(dir, scriptsFolder);
+        if (pkg == null) {
+            String msg = "目录里没有 main.lua / main.py / main.js";
+            plugin.getLogger().warning("[" + dir.getName() + "] " + msg + "，已跳过");
+            return ScriptLoadResult.error(dir.getName(), msg);
+        }
+        if (!pkg.enabled()) {
+            plugin.getLogger().info("[" + pkg.name() + "] 已在配置里禁用（_enabled=false），跳过加载");
+            return ScriptLoadResult.error(pkg.name(), "已禁用");
+        }
+        if (!pkg.requirements().isEmpty()) {
+            plugin.getLogger().warning("[" + pkg.name() + "] 声明了依赖 "
+                    + String.join(", ", pkg.requirements()) + "，不会自动安装，请自行确认运行环境已满足");
+        }
+        String key = dir.getName().toLowerCase();
+        if (loaded.containsKey(key)) {
+            plugin.getLogger().warning("脚本已加载，跳过: " + key);
+            return ScriptLoadResult.error(pkg.name(), "已加载");
+        }
+        for (LoadedScript existing : loaded.values()) {
+            if (existing.api().addonName().equals(pkg.name())) {
+                plugin.getLogger().severe("[" + dir.getName() + "] 插件名 " + pkg.name() + " 已被另一个目录使用，已跳过");
+                return ScriptLoadResult.error(pkg.name(), "插件名重复");
+            }
+        }
         // 脚本在执行期间就会调用 registerBotCommand，而它要求扩展已经登记。
-        // 所以先按文件名登记一份，脚本自己再调 registerAddon 时会覆盖元数据。
-        plugin.registerAddon(baseName(name), "1.0.0", "script addon", name);
+        plugin.registerAddon(pkg.name(), pkg.manifest().version(),
+                pkg.manifest().description().isEmpty() ? "script addon" : pkg.manifest().description(),
+                pkg.manifest().author());
         ScriptLoadResult result;
-        if (lower.endsWith(".lua")) {
-            result = loadLuaScript(file, name);
-        } else if (lower.endsWith(".py")) {
-            result = loadPythonScript(file, name);
-        } else {
-            result = loadJsScript(file, name);
+        switch (pkg.language()) {
+            case ".lua":
+                result = loadLuaScript(pkg);
+                break;
+            case ".py":
+                result = loadPythonScript(pkg);
+                break;
+            default:
+                result = loadJsScript(pkg);
         }
         if (result.success()) {
-            LoadedScript loadedScript = loaded.get(name);
+            LoadedScript loadedScript = loaded.get(key);
             if (loadedScript != null) {
-                registerAsAddon(loadedScript.api(), name);
+                registerAsAddon(loadedScript.api(), pkg);
             }
+        } else {
+            // 脚本执行前已经登记过，失败了不能留一个空 addon 在 QQ 菜单里。
+            plugin.unregisterAddon(pkg.name());
         }
         return result;
     }
@@ -186,18 +234,34 @@ public class ScriptAddonLoader {
         return dot < 0 ? fileName : fileName.substring(0, dot);
     }
 
-    /** Registers the script itself as a HuHoBot addon (idempotent). */
-    private void registerAsAddon(BirdScriptApi api, String fileName) {
+    /** 用语言描述覆盖加载前登记的那份元数据。metadata.yaml 里写了描述就用它。 */
+    private void registerAsAddon(BirdScriptApi api, ScriptPackage pkg) {
         try {
-            String language = fileName.toLowerCase().endsWith(".py") ? "Python"
-                    : fileName.toLowerCase().endsWith(".lua") ? "Lua" : "JavaScript";
-            api.registerAddon(api.addonName(), "1.0.0", language + " script addon", fileName);
+            String language = ".py".equals(pkg.language()) ? "Python"
+                    : ".lua".equals(pkg.language()) ? "Lua" : "JavaScript";
+            String description = pkg.manifest().description().isEmpty()
+                    ? language + " script addon" : pkg.manifest().description();
+            api.registerAddon(pkg.name(), pkg.manifest().version(), description, pkg.manifest().author());
         } catch (Throwable t) {
-            plugin.getLogger().warning("[" + fileName + "] Failed to register HuHoBot addon: " + t.getMessage());
+            plugin.getLogger().warning("[" + pkg.name() + "] Failed to register HuHoBot addon: " + t.getMessage());
         }
     }
 
-    private ScriptLoadResult loadLuaScript(File file, String name) {
+    /** 三个引擎都注入同一组全局对象：Bird、Bukkit、server、plugin、config、kv、DATA_DIR。 */
+    private void bindCommon(Object session, BirdScriptApi api, ScriptPackage pkg) throws Exception {
+        Method bind = session.getClass().getMethod("bind", String.class, Object.class);
+        bind.invoke(session, "Bird", api);
+        bind.invoke(session, "Bukkit", org.bukkit.Bukkit.class);
+        bind.invoke(session, "server", plugin.getServer());
+        bind.invoke(session, "plugin", plugin);
+        bind.invoke(session, "config", pkg.config());
+        bind.invoke(session, "kv", pkg.kv());
+        bind.invoke(session, "DATA_DIR", pkg.dataDir().getAbsolutePath());
+    }
+
+    private ScriptLoadResult loadLuaScript(ScriptPackage pkg) {
+        String name = pkg.name();
+        File file = pkg.entryFile();
         try {
             Globals globals = JsePlatform.standardGlobals();
 
@@ -206,13 +270,16 @@ public class ScriptAddonLoader {
             globals.set("Bukkit", CoerceJavaToLua.coerce(org.bukkit.Bukkit.class));
             globals.set("server", CoerceJavaToLua.coerce(plugin.getServer()));
             globals.set("plugin", CoerceJavaToLua.coerce(plugin));
+            globals.set("config", CoerceJavaToLua.coerce(pkg.config()));
+            globals.set("kv", CoerceJavaToLua.coerce(pkg.kv()));
+            globals.set("DATA_DIR", pkg.dataDir().getAbsolutePath());
 
             try (FileInputStream in = new FileInputStream(file)) {
-                LuaValue chunk = globals.load(in, name, "t", globals);
+                LuaValue chunk = globals.load(in, file.getName(), "t", globals);
                 chunk.call();
             }
 
-            loaded.put(name, new LoadedScript(name, file, globals, api));
+            loaded.put(pkg.directory().getName().toLowerCase(), new LoadedScript(name, file, globals, api));
             plugin.getLogger().info("Loaded script addon: " + name);
             return ScriptLoadResult.ok(name);
 
@@ -228,7 +295,9 @@ public class ScriptAddonLoader {
         }
     }
 
-    private ScriptLoadResult loadJsScript(File file, String name) {
+    private ScriptLoadResult loadJsScript(ScriptPackage pkg) {
+        String name = pkg.name();
+        File file = pkg.entryFile();
         ClassLoader loader = engineLoader();
         if (loader == null) {
             plugin.getLogger().severe("[" + name + "] " + engineLoaderError);
@@ -246,14 +315,10 @@ public class ScriptAddonLoader {
             previous = null;
 
             BirdScriptApi api = new BirdScriptApi(plugin, name, scriptsFolder);
-            Method bind = session.getClass().getMethod("bind", String.class, Object.class);
-            bind.invoke(session, "Bird", api);
-            bind.invoke(session, "Bukkit", org.bukkit.Bukkit.class);
-            bind.invoke(session, "server", plugin.getServer());
-            bind.invoke(session, "plugin", plugin);
+            bindCommon(session, api, pkg);
             session.getClass().getMethod("eval", File.class).invoke(session, file);
 
-            loaded.put(name, new LoadedScript(name, file, session, api));
+            loaded.put(pkg.directory().getName().toLowerCase(), new LoadedScript(name, file, session, api));
             plugin.getLogger().info("Loaded script addon: " + name);
             return ScriptLoadResult.ok(name);
 
@@ -275,7 +340,9 @@ public class ScriptAddonLoader {
         }
     }
 
-    private ScriptLoadResult loadPythonScript(File file, String name) {
+    private ScriptLoadResult loadPythonScript(ScriptPackage pkg) {
+        String name = pkg.name();
+        File file = pkg.entryFile();
         Object engine = pythonEngine();
         if (engine == null) {
             plugin.getLogger().severe("[" + name + "] " + pythonEngineError);
@@ -294,14 +361,11 @@ public class ScriptAddonLoader {
             previous = null;
 
             BirdScriptApi api = new BirdScriptApi(plugin, name, scriptsFolder);
-            Method bind = session.getClass().getMethod("bind", String.class, Object.class);
-            bind.invoke(session, "Bird", api);
-            bind.invoke(session, "Bukkit", org.bukkit.Bukkit.class);
-            bind.invoke(session, "server", plugin.getServer());
-            bind.invoke(session, "plugin", plugin);
+            bindCommon(session, api, pkg);
+            precheckPythonRequirements(session, pkg);
             session.getClass().getMethod("eval", File.class).invoke(session, file);
 
-            loaded.put(name, new LoadedScript(name, file, session, api));
+            loaded.put(pkg.directory().getName().toLowerCase(), new LoadedScript(name, file, session, api));
             plugin.getLogger().info("Loaded script addon: " + name);
             return ScriptLoadResult.ok(name);
         } catch (InvocationTargetException error) {
@@ -382,50 +446,61 @@ public class ScriptAddonLoader {
         return loadAll();
     }
 
-    public ScriptLoadResult reloadOne(String fileNameInput) {
-        String lowerInput = fileNameInput.toLowerCase();
-        String fileName;
-        if (lowerInput.endsWith(".js") || lowerInput.endsWith(".lua") || lowerInput.endsWith(".py")) {
-            fileName = fileNameInput;
-        } else {
-            File luaCandidate = new File(scriptsFolder, fileNameInput + ".lua");
-            File pyCandidate = new File(scriptsFolder, fileNameInput + ".py");
-            if (luaCandidate.isFile()) {
-                fileName = fileNameInput + ".lua";
-            } else if (pyCandidate.isFile()) {
-                fileName = fileNameInput + ".py";
-            } else {
-                fileName = fileNameInput + ".js";
+    /** 重载一个目录插件。参数是目录名，大小写不敏感。 */
+    public ScriptLoadResult reloadOne(String nameInput) {
+        File[] dirs = scriptsFolder.listFiles(File::isDirectory);
+        File target = null;
+        if (dirs != null) {
+            for (File dir : dirs) {
+                if (dir.getName().equalsIgnoreCase(nameInput.trim())) {
+                    target = dir;
+                    break;
+                }
             }
         }
-
-        File file = new File(scriptsFolder, fileName);
-        if (!file.exists() || !file.isFile()) {
-            return ScriptLoadResult.notFound(fileName);
+        if (target == null) {
+            return ScriptLoadResult.notFound(nameInput);
         }
 
-        LoadedScript existing = loaded.remove(fileName);
+        LoadedScript existing = loaded.remove(target.getName().toLowerCase());
         if (existing != null) {
             try {
                 existing.api().unregisterAll();
             } catch (Exception e) {
-                plugin.getLogger().warning("Problem unloading previous version of " + fileName + ": " + e.getMessage());
+                plugin.getLogger().warning("Problem unloading previous version of " + nameInput + ": " + e.getMessage());
             }
             closeEngine(existing.engine());
         }
 
-        return loadScript(file);
+        return loadDirectory(target);
     }
 
+    /** 列出 addons/ 下的插件目录名，给命令补全用。 */
     public List<String> listScriptFileNames() {
-        File[] files = scriptsFolder.listFiles((dir, name) -> isScriptFile(name));
+        File[] dirs = scriptsFolder.listFiles(File::isDirectory);
         List<String> names = new ArrayList<>();
-        if (files != null) {
-            for (File f : files) {
-                names.add(f.getName());
+        if (dirs != null) {
+            for (File dir : dirs) {
+                if ("config".equalsIgnoreCase(dir.getName()) || "data".equalsIgnoreCase(dir.getName())
+                        || "files".equalsIgnoreCase(dir.getName())) continue;
+                names.add(dir.getName());
             }
         }
         return names;
+    }
+
+    /** requirements.txt 的预检：逐个 import，失败只记警告，不安装。 */
+    private void precheckPythonRequirements(Object session, ScriptPackage pkg) {
+        for (String requirement : pkg.requirements()) {
+            String module = requirement.replaceAll("[<>=!\\[;].*$", "").trim().replace("'", "");
+            if (module.isEmpty()) continue;
+            try {
+                session.getClass().getMethod("evalSource", String.class).invoke(session, "__import__('" + module + "')");
+            } catch (Throwable missing) {
+                plugin.getLogger().warning("[" + pkg.name() + "] 依赖预检: 缺少 " + module
+                        + "（requirements.txt），GraalPy 默认不带第三方库");
+            }
+        }
     }
 
     public int getLoadedCount() {
